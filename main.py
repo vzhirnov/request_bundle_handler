@@ -3,14 +3,15 @@ import random
 import asyncio
 
 from typing import Callable, Union
+
 from rest_client import SyncRestClient, AsyncRestClient, ProtectedRestClient
 
-from aiohttp.client_reqrep import ClientResponse
 from requests.models import Response
+from aiohttp.client_reqrep import ClientResponse
 
 
 class BaseSender:
-    """
+    """  TODO fix description, add type definitions
     gets bundle of data to send
     returns bundle of responses
     Can:
@@ -28,10 +29,10 @@ class BaseSender:
         self.host = host
         self.path = path
         self.headers = headers
-        self.rps = 1 / rps
 
-        self.need_abort = False
-        self.need_suspend = False
+        self._rps = 1 / rps
+        self._need_abort = False
+        self._need_suspend = False
 
         self.request_handler: Callable = lambda: True
         self.response_handler: Callable = lambda: True
@@ -51,9 +52,9 @@ class BaseSender:
 
         self.send_mode = send_mode
         self.current_rps_setter = \
-            self.make_async_rps if any([self.send_mode == x for x in ["ASYNC", "PROTECTED"]]) else self.make_sync_rps
+            self._make_async_rps if any([self.send_mode == x for x in ["ASYNC", "PROTECTED"]]) else self._make_sync_rps
 
-    def send_sync_with_method(self, method):
+    def _send_sync_with_method(self, method):
         senders = {
             "POST": self.sync_rest_client.post,
             "PUT": self.sync_rest_client.put,
@@ -61,7 +62,7 @@ class BaseSender:
         }
         return senders[method]
 
-    def send_async_with_method(self, method):
+    def _send_async_with_method(self, method):
         senders = {
             "POST": self.async_rest_client.post,
             "PUT": self.async_rest_client.put,
@@ -69,7 +70,7 @@ class BaseSender:
         }
         return senders[method]
 
-    def send_protected_with_method(self, method, request_num=0):
+    def _send_protected_with_method(self, method, request_num=0):
         self.protected_rest_client.request_num = request_num
         senders = {
             "POST": self.protected_rest_client.post,
@@ -78,29 +79,29 @@ class BaseSender:
         }
         return senders[method]
 
+    def _make_sync_rps(self, rand=False):
+        time.sleep(self._rps if rand is False else random.randrange(0, 5))  # TODO magis number
+
+    async def _make_async_rps(self, rand=False):
+        await asyncio.sleep(self._rps if rand is False else random.randrange(0, 5))  # TODO magis number
+
+    def _control_rps(self, mode_setter: Callable):
+        mode_setter()
+
+    async def _control_async_rps(self, mode_setter: Callable):
+        await mode_setter()
+
+    @staticmethod
+    def _func_to_execute(slf, fun, *args, **kwargs):
+        def wrapper():
+            return fun(slf, *args, **kwargs)
+        return wrapper
+
     def get_response(self):
         return self.response
 
     def set_rps(self, rps):
-        self.rps = rps
-
-    def make_sync_rps(self, rand=False):
-        time.sleep(self.rps if rand is False else random.randrange(0, 5))
-
-    async def make_async_rps(self, rand=False):
-        await asyncio.sleep(self.rps if rand is False else random.randrange(0, 5))
-
-    def control_rps(self, mode_setter: Callable):
-        mode_setter()
-
-    async def control_async_rps(self, mode_setter: Callable):
-        await mode_setter()
-
-    @staticmethod
-    def _func_to_execute(slf, fun, *args, **kwargs):  # TODO make all req methods private _
-        def wrapper():
-            return fun(slf, *args, **kwargs)
-        return wrapper
+        self._rps = rps
 
     def handle_each_request_by(self, slf, fun: Callable, *args, **kwargs):
         self.request_handler = self._func_to_execute(slf, fun, *args, **kwargs)
@@ -135,21 +136,21 @@ class JsonSender(BaseSender):
 
         self.json_bundle = json_bundle
 
-    async def start_in_protected_mode(self, json_bundle):
-        self.current_rps_setter = self.make_async_rps
+    async def _start_in_protected_mode(self, json_bundle):
+        self.current_rps_setter = self._make_async_rps
 
         request_tasks = [
-            self.send_protected_with_method(self.method, request_num=request_num)(self.path, json=json)
+            self._send_protected_with_method(self.method, request_num=request_num)(self.path, json=json)
             for request_num, json in enumerate(json_bundle)
         ]
         for f in request_tasks:
-            await self.control_async_rps(self.current_rps_setter)
+            await self._control_async_rps(self.current_rps_setter)
 
-            if self.need_abort:
+            if self._need_abort:
                 break
-            elif self.need_suspend:
-                while self.need_suspend:
-                    await asyncio.sleep(0.5)
+            elif self._need_suspend:
+                while self._need_suspend:
+                    await asyncio.sleep(0.5)  # TODO magis number
 
             self.request_handler()
             res = await f
@@ -157,35 +158,36 @@ class JsonSender(BaseSender):
             self.response_handler()
 
             if any([condition for condition in self.conditions_for_resend]):
-            # if self.response.status != 200:
-                self.bundle_to_resend.append(res.request_num)
+                if self.send_mode != "PROTECTED":
+                    print("Cannot apply conditions_for_resend because method name is not 'PROTECTED'")
+                else:
+                    self.bundle_to_resend.append(res.request_num)
             else:
                 self.results_bundle.append(self.response)
 
         if self.bundle_to_resend:
             print(
-                f"\nGot requests with response status 500 (in the amount of {len(self.bundle_to_resend)}), "
+                f"\nNeed to resend several requests (in the amount of {len(self.bundle_to_resend)}), "
                 f"resend them for additional check:",
                 end="\n",
             )
+            self._start_in_sync_mode(self.bundle_to_resend)
 
-            self.start_in_sync_mode(self.bundle_to_resend)
-
-    async def start_in_async_mode(self, json_bundle):
-        self.current_rps_setter = self.make_async_rps
+    async def _start_in_async_mode(self, json_bundle):
+        self.current_rps_setter = self._make_async_rps
 
         request_tasks = [
-            self.send_async_with_method(self.method)(self.path, json=json)
+            self._send_async_with_method(self.method)(self.path, json=json)
             for json in json_bundle
         ]
         for f in request_tasks:
-            await self.control_async_rps(self.current_rps_setter)
+            await self._control_async_rps(self.current_rps_setter)
 
-            if self.need_abort:
+            if self._need_abort:
                 break
-            elif self.need_suspend:
-                while self.need_suspend:
-                    await asyncio.sleep(0.5)
+            elif self._need_suspend:
+                while self._need_suspend:
+                    await asyncio.sleep(0.5)  # TODO magis number
 
             self.request_handler()
             self.response = await f
@@ -193,40 +195,40 @@ class JsonSender(BaseSender):
 
             self.results_bundle.append(self.response)
 
-    def start_in_sync_mode(self, json_bundle):
-        self.current_rps_setter = self.make_sync_rps
+    def _start_in_sync_mode(self, json_bundle):
+        self.current_rps_setter = self._make_sync_rps
 
         for json in json_bundle:
-            self.control_rps(self.current_rps_setter)
+            self._control_rps(self.current_rps_setter)
 
-            if self.need_abort:
+            if self._need_abort:
                 break
-            elif self.need_suspend:
-                while self.need_suspend:
-                    time.sleep(0.5)
+            elif self._need_suspend:
+                while self._need_suspend:
+                    time.sleep(0.5)  # TODO magis number
 
             self.request_handler()
-            self.response = self.send_sync_with_method(self.method)(self.path, json=json)
+            self.response = self._send_sync_with_method(self.method)(self.path, json=json)
             self.response_handler()
 
             self.results_bundle.append(self.response)
 
     def start(self):
         if self.send_mode == "SYNC":
-            self.start_in_sync_mode(self.json_bundle)
+            self._start_in_sync_mode(self.json_bundle)
         elif self.send_mode == "ASYNC":
-            asyncio.run(self.start_in_async_mode(self.json_bundle))
+            asyncio.run(self._start_in_async_mode(self.json_bundle))
         else:
-            asyncio.run(self.start_in_protected_mode(self.json_bundle))
+            asyncio.run(self._start_in_protected_mode(self.json_bundle))
 
     def stop(self):
-        self.need_abort = True
+        self._need_abort = True
 
     def suspend(self):
-        self.need_suspend = True
+        self._need_suspend = True
 
     def go_on(self):
-        self.need_suspend = False
+        self._need_suspend = False
 
 
 if __name__ == "__main__":
@@ -235,7 +237,7 @@ if __name__ == "__main__":
     rs = JsonSender(
         method="POST",
         json_bundle=jb,
-        host="http://localhost:8080",
+        host="http://localhost:8000",
         path='/',
         headers={},
         rps=100,
@@ -251,3 +253,4 @@ if __name__ == "__main__":
         js.go_on()
     rs.handle_each_response_by(rs, p, 0)
     rs.start()
+    print(rs.results_bundle)

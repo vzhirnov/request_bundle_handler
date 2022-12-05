@@ -82,7 +82,7 @@ class ProtectedRestClient(RestClient):
         url = f"{self.host}{path}"
 
         Res = namedtuple(
-            "FuzzResults",
+            "Response",
             "response request_num",
         )
 
